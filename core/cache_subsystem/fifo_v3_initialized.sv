@@ -115,7 +115,6 @@ module fifo_v3_initialized #(
             read_pointer_q  <= '0;
             write_pointer_q <= '0;
             status_cnt_q    <= FifoDepth[ADDR_DEPTH:0];
-            mem_q           <= reset_value_i;
         end else begin
             if (flush_i) begin
                 read_pointer_q  <= '0;
@@ -132,7 +131,7 @@ module fifo_v3_initialized #(
 
     always_ff @(posedge clk_i or negedge rst_ni) begin
         if(~rst_ni) begin
-            mem_q <= '0;
+            mem_q <= reset_value_i;
         end else if (!gate_clock) begin
             mem_q <= mem_n;
         end
@@ -145,11 +144,11 @@ module fifo_v3_initialized #(
     end
 
     full_write : assert property(
-        @(posedge clk_i) disable iff (~rst_ni) (full_o |-> ~push_i))
+        @(posedge clk_i) disable iff (rst_ni !== 1) (full_o |-> ~push_i))
         else $fatal (1, "Trying to push new data although the FIFO is full.");
 
     empty_read : assert property(
-        @(posedge clk_i) disable iff (~rst_ni) (empty_o |-> ~pop_i))
+        @(posedge clk_i) disable iff (rst_ni !== 1) (empty_o |-> ~pop_i))
         else $fatal (1, "Trying to pop data although the FIFO is empty.");
 `endif
 // pragma translate_on
