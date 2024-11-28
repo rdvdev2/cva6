@@ -76,6 +76,19 @@ module wt_l15_adapter import ariane_pkg::*; import wt_cache_pkg::*; #(
   input  l15_rtrn_t            l15_rtrn_i
 );
 
+// threadid renaming (request & return path)
+typedef logic [L15_TID_WIDTH-1:0] free_tid_t;
+
+logic no_free_tid;
+logic mem_only_inval;
+
+free_tid_t [(2 ** L15_TID_WIDTH)-1:0] free_tid_list; // fifo initial value
+
+logic [CACHE_ID_WIDTH-1:0] tid_rename_map [(2 ** L15_TID_WIDTH)-1:0]; // maps assigned l15 tid to original l1 cache id
+logic tid_rename_map_write_enable;
+free_tid_t tid_rename_map_write_tid;
+logic [CACHE_ID_WIDTH-1:0] tid_rename_map_write_cache_id;
+
 // request path
 icache_req_t icache_data;
 logic icache_data_full, icache_data_empty;
@@ -90,6 +103,50 @@ logic       arb_idx;
 logic rtrn_fifo_empty, rtrn_fifo_full, rtrn_fifo_pop;
 l15_rtrn_t rtrn_fifo_data;
 
+///////////////////////////////////////////////////////
+// threadid renaming (request & return path)
+///////////////////////////////////////////////////////
+
+  assign mem_only_inval = l15_rtrn_i.l15_returntype==L15_EVICT_REQ;
+
+  always_ff @(posedge clk_i or negedge rst_ni) begin : tid_rename_map_ff
+    if (~rst_ni) begin
+      tid_rename_map = '{default:0};
+    end else begin
+      if(tid_rename_map_write_enable) begin
+        tid_rename_map[tid_rename_map_write_tid] = tid_rename_map_write_cache_id;
+      end
+    end
+  end
+
+  always_comb begin : free_tid_list_init_comb
+    for (int unsigned i = 0; i < 2 ** L15_TID_WIDTH; i++) begin
+      free_tid_list[i] = i;
+    end
+  end
+
+  // free tids fifo
+  fifo_v3_initialized #(
+    .DEPTH       (  2 ** L15_TID_WIDTH                    ),
+    .dtype       (  free_tid_t                            )
+  ) free_tid_fifo (
+    .clk_i       (  clk_i                                 ),
+    .rst_ni      (  rst_ni                                ),
+    .flush_i     (  1'b0                                  ),
+    .reset_value_i (  free_tid_list                       ),
+    .testmode_i  (  1'b0                                  ),
+    .full_o      (                                        ),
+    .empty_o     (  no_free_tid                           ),
+    .usage_o     (                                        ),
+    .data_i      (  l15_rtrn_i.l15_threadid               ),
+    .push_i      (  l15_rtrn_i.l15_val && ~mem_only_inval ),
+    .data_o      (  l15_req_o.l15_threadid                ),
+    .pop_i       (  l15_rtrn_i.l15_ack                    )
+  );
+
+  assign tid_rename_map_write_enable   = l15_req_o.l15_val;
+  assign tid_rename_map_write_tid      = l15_req_o.l15_threadid;
+  assign tid_rename_map_write_cache_id = (arb_idx) ? dcache_data.tid : icache_data.tid;
 
 ///////////////////////////////////////////////////////
 // request path to L15
@@ -116,7 +173,6 @@ l15_rtrn_t rtrn_fifo_data;
   // icache fills are either cachelines or 4byte fills, depending on whether they go to the Piton I/O space or not.
   assign l15_req_o.l15_size                 = (arb_idx)        ? dcache_data.size  :
                                               (icache_data.nc) ? 3'b010            : 3'b111;
-  assign l15_req_o.l15_threadid             = (arb_idx)        ? dcache_data.tid   : icache_data.tid;
   assign l15_req_o.l15_prefetch             = '0; // unused in openpiton
   assign l15_req_o.l15_invalidate_cacheline = '0; // unused by Ariane as L1 has no ECC at the moment
   assign l15_req_o.l15_blockstore           = '0; // unused in openpiton
@@ -143,7 +199,7 @@ l15_rtrn_t rtrn_fifo_data;
     .clk_i  ( clk_i                ),
     .rst_ni ( rst_ni               ),
     .flush_i( '0                   ),
-    .en_i   ( l15_rtrn_i.l15_ack   ),
+    .en_i   ( l15_rtrn_i.l15_ack & ~no_free_tid ),
     .req_i  ( arb_req              ),
     .ack_o  ( arb_ack              ),
     .vld_o  (                      ),
@@ -151,7 +207,7 @@ l15_rtrn_t rtrn_fifo_data;
   );
 
   assign arb_req           = {~dcache_data_empty, ~icache_data_empty};
-  assign l15_req_o.l15_val = (|arb_req);// & ~header_ack_q;
+  assign l15_req_o.l15_val = (|arb_req && ~no_free_tid);// & ~header_ack_q;
 
   // encode packet type
   always_comb begin : p_req
@@ -307,8 +363,8 @@ l15_rtrn_t rtrn_fifo_data;
   end
 
   // fifo signals
-  assign icache_rtrn_o.tid      = rtrn_fifo_data.l15_threadid;
-  assign dcache_rtrn_o.tid      = rtrn_fifo_data.l15_threadid;
+  assign icache_rtrn_o.tid      = tid_rename_map[rtrn_fifo_data.l15_threadid];
+  assign dcache_rtrn_o.tid      = tid_rename_map[rtrn_fifo_data.l15_threadid];
 
   // invalidation signal mapping
   assign icache_rtrn_o.inv.idx  = {rtrn_fifo_data.l15_inval_address_15_4, 4'b0000};
